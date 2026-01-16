@@ -1,90 +1,99 @@
 import streamlit as st
 import openai
-import json
-import os
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
-from dotenv import load_dotenv
 
-# .envファイルから環境変数を読み込む
-load_dotenv()
-
-# OpenAI APIキーの設定
-openai.api_key = os.getenv("OPENAI_API_KEY")
-
-# データを保存するファイル名
-DATA_FILE = "memo_history.json"
+# --- 設定 ---
+# 接続するスプレッドシートの名前（正確に入力してください）
+SHEET_NAME = "ai_memo_data"
 
 # --- 関数定義 ---
 
-def load_history():
-    """保存された履歴を読み込む"""
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            try:
-                return json.load(f)
-            except json.JSONDecodeError:
-                return []
-    return []
-
-def save_history(history):
-    """履歴をファイルに保存する"""
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(history, f, ensure_ascii=False, indent=4)
+def connect_to_sheet():
+    """Googleスプレッドシートに接続する"""
+    try:
+        # StreamlitのSecretsから認証情報を取得
+        # (辞書形式で定義されていることを想定)
+        creds_dict = st.secrets["gcp_service_account"]
+        
+        scope = [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        
+        # スプレッドシートを開く
+        sheet = client.open(SHEET_NAME).sheet1
+        return sheet
+    except Exception as e:
+        st.error(f"スプレッドシート接続エラー: {e}")
+        return None
 
 def get_ai_response(user_input):
-    """OpenAI APIを使って応答を取得する"""
+    """OpenAI APIで応答を取得"""
     try:
-        client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        client = openai.OpenAI(api_key=st.secrets["openai"]["api_key"])
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo", # または gpt-4
+            model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "あなたは優秀なメモアシスタントです。ユーザーの入力を整理して記録してください。"},
+                {"role": "system", "content": "あなたは優秀な記録係です。簡潔に応答してください。"},
                 {"role": "user", "content": user_input}
             ]
         )
         return response.choices[0].message.content
     except Exception as e:
-        return f"エラーが発生しました: {e}"
+        return f"AIエラー: {e}"
 
-# --- アプリケーションのUI (Streamlit) ---
+# --- アプリケーション UI ---
 
-st.title("📝 AI メモ & レコーダー")
-st.write("自由にテキストを入力してください。AIが応答し、履歴を記録します。")
+st.title("📱 AIメモ (クラウド保存版)")
+st.write("入力内容はGoogleスプレッドシートに自動保存されます。")
 
-# 履歴の初期化
-if "history" not in st.session_state:
-    st.session_state.history = load_history()
+# シート接続
+sheet = connect_to_sheet()
 
-# 入力フォーム
-with st.form("memo_form", clear_on_submit=True):
-    user_input = st.text_area("内容を入力", height=100)
-    submitted = st.form_submit_button("記録する")
+if sheet:
+    # 入力フォーム
+    with st.form("memo_form", clear_on_submit=True):
+        user_input = st.text_area("メモを入力", height=100)
+        submitted = st.form_submit_button("記録")
 
-    if submitted and user_input:
-        # AIの応答を取得
-        with st.spinner("AIが思考中..."):
-            ai_reply = get_ai_response(user_input)
-        
-        # データの構築
-        record = {
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "user": user_input,
-            "ai": ai_reply
-        }
-        
-        # 履歴に追加して保存
-        st.session_state.history.insert(0, record) # 新しいものを上に
-        save_history(st.session_state.history)
-        st.success("記録しました！")
+        if submitted and user_input:
+            with st.spinner("AI思考中 & スプレッドシート書き込み中..."):
+                # 1. AI応答
+                ai_reply = get_ai_response(user_input)
+                
+                # 2. 現在時刻
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                
+                # 3. シートに追加 (行: 日時, ユーザー, AI)
+                sheet.append_row([now, user_input, ai_reply])
+                
+                st.success("スプレッドシートに保存しました！")
 
-# 履歴の表示
-st.divider()
-st.subheader("📜 過去の記録")
+    # 履歴の表示（最新5件だけ取得して表示など）
+    st.divider()
+    st.subheader("📋 最新の記録")
+    
+    # 全データを取得（データ量が多い場合は注意）
+    try:
+        all_records = sheet.get_all_records()
+        # リストを逆順にして最新を上に
+        for record in reversed(all_records[-10:]): # 最新10件まで
+            # カラム名はスプレッドシートの1行目に依存します
+            # 1行目に「Timestamp」「User」「AI」と書いてある想定
+            timestamp = record.get("Timestamp", "")
+            user_text = record.get("User", "")
+            ai_text = record.get("AI", "")
+            
+            with st.expander(f"{timestamp} - {str(user_text)[:15]}..."):
+                st.markdown(f"**あなた:**\n{user_text}")
+                st.info(f"**AI:**\n{ai_text}")
+    except Exception as e:
+        st.caption("データの読み込みに失敗しました（またはデータが空です）。")
 
-if st.session_state.history:
-    for item in st.session_state.history:
-        with st.expander(f"{item['timestamp']} - {item['user'][:20]}..."):
-            st.markdown(f"**あなた:**\n{item['user']}")
-            st.info(f"**AI:**\n{item['ai']}")
 else:
-    st.write("まだ記録はありません。")
+    st.warning("スプレッドシートに接続できませんでした。Secretsの設定を確認してください。")
