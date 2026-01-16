@@ -1,0 +1,12 @@
+# 環境変数ファイル（APIキーなど）
+.env
+
+# Pythonのキャッシュ
+__pycache__/
+*.pyc
+
+# ローカルデータ（自分のメモ履歴を公開したくない場合）
+memo_history.json
+
+# Macのシステムファイル
+.DS_Store
